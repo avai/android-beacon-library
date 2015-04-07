@@ -1,6 +1,5 @@
 package org.altbeacon.beacon.service.scanner;
 
-import android.annotation.SuppressLint;
 import android.annotation.TargetApi;
 import android.bluetooth.le.BluetoothLeScanner;
 import android.bluetooth.le.ScanCallback;
@@ -8,10 +7,9 @@ import android.bluetooth.le.ScanFilter;
 import android.bluetooth.le.ScanResult;
 import android.bluetooth.le.ScanSettings;
 import android.content.Context;
-import android.util.Log;
-import org.altbeacon.beacon.BeaconParser;
 
 import org.altbeacon.beacon.BeaconManager;
+import org.altbeacon.beacon.logging.LogManager;
 import org.altbeacon.beacon.service.DetectionTracker;
 import org.altbeacon.bluetooth.BluetoothCrashResolver;
 
@@ -37,10 +35,12 @@ public class CycledLeScannerForLollipop extends CycledLeScanner {
     @Override
     protected void stopScan() {
         try {
-            mScanner.stopScan(getNewLeScanCallback());
+            if (getScanner() != null) {
+                getScanner().stopScan(getNewLeScanCallback());
+            }
         }
         catch (Exception e) {
-            Log.w("Internal Android exception scanning for beacons: ", e);
+            LogManager.w(e, TAG, "Internal Android exception scanning for beacons");
         }
     }
 
@@ -89,18 +89,26 @@ public class CycledLeScannerForLollipop extends CycledLeScanner {
                     if (secsSinceLastDetection > BACKGROUND_L_SCAN_DETECTION_PERIOD_MILLIS) {
                         mBackgroundLScanStartTime = System.currentTimeMillis();
                         mBackgroundLScanFirstDetectionTime = 0l;
-                        BeaconManager.logDebug(TAG, "This is Android L. Doing a filtered scan for the background.");
+                        LogManager.d(TAG, "This is Android L. Doing a filtered scan for the background.");
 
                         // On Android L, between scan cycles do a scan with a filter looking for any beacon
                         // if we see one of those beacons, we need to deliver the results
                         ScanSettings settings = (new ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_POWER)).build();
 
-                        mScanner.startScan(new ScanFilterUtils().createScanFiltersForBeaconParsers(mBeaconManager.getBeaconParsers()), settings,
-                                (android.bluetooth.le.ScanCallback) getNewLeScanCallback());
-                    }
-                    else {
-                        BeaconManager.logDebug(TAG, "This is Android L, but we last saw a beacon only "+
-                                secsSinceLastDetection+" ago, so we will not keep scanning in background.");
+                        try {
+                            if (getScanner() != null) {
+                                getScanner().startScan(new ScanFilterUtils().createScanFiltersForBeaconParsers(
+                                        mBeaconManager.getBeaconParsers()), settings, getNewLeScanCallback());
+                            }
+                        }
+                        catch (IllegalStateException e) {
+                            LogManager.w(TAG, "Cannot start scan.  Bluetooth may be turned off.");
+                        }
+
+                    } else {
+                        LogManager.d(TAG, "This is Android L, but we last saw a beacon only %s "
+                                + "ago, so we will not keep scanning in background.",
+                                secsSinceLastDetection);
                     }
                 }
                 if (mBackgroundLScanStartTime > 0l) {
@@ -114,19 +122,27 @@ public class CycledLeScannerForLollipop extends CycledLeScanner {
                             // if we are in here, it has been more than 10 seconds since we detected
                             // a beacon in background L scanning mode.  We need to stop scanning
                             // so we do not drain battery
-                            BeaconManager.logDebug(TAG, "We've been detecting for a bit.  Stopping Android L background scanning");
-                            mScanner.stopScan((android.bluetooth.le.ScanCallback) getNewLeScanCallback());
+                            LogManager.d(TAG, "We've been detecting for a bit.  Stopping Android L background scanning");
+                            try {
+                                if (getScanner() != null) {
+                                    getScanner().stopScan((android.bluetooth.le.ScanCallback) getNewLeScanCallback());
+                                }
+                            }
+                            catch (IllegalStateException e) {
+                                LogManager.w(TAG, "Cannot stop scan.  Bluetooth may be turned off.");
+                            }
                             mBackgroundLScanStartTime = 0l;
                         }
                         else {
                             // report the results up the chain
-                            BeaconManager.logDebug(TAG, "Delivering Android L background scanning results");
+                            LogManager.d(TAG, "Delivering Android L background scanning results");
                             mCycledLeScanCallback.onCycleEnd();
                         }
                     }
                 }
             }
-            BeaconManager.logDebug(TAG, "Waiting to start full bluetooth scan for another " + millisecondsUntilStart + " milliseconds");
+            LogManager.d(TAG, "Waiting to start full bluetooth scan for another %s milliseconds",
+                    millisecondsUntilStart);
             // Don't actually wait until the next scan time -- only wait up to 1 second.  this
             // allows us to start scanning sooner if a consumer enters the foreground and expects
             // results more quickly
@@ -144,8 +160,15 @@ public class CycledLeScannerForLollipop extends CycledLeScanner {
         }
         else {
             if (mBackgroundLScanStartTime > 0l) {
-                BeaconManager.logDebug(TAG, "Stopping Android L background scanning to start full scan");
-                mScanner.stopScan((android.bluetooth.le.ScanCallback) getNewLeScanCallback());
+                try {
+                    if (getScanner() != null) {
+                        getScanner().stopScan((android.bluetooth.le.ScanCallback) getNewLeScanCallback());
+                    }
+                }
+                catch (IllegalStateException e) {
+                    LogManager.w(TAG, "Cannot stop scan.  Bluetooth may be turned off.");
+                }
+
                 mBackgroundLScanStartTime = 0;
             }
             mScanDeferredBefore = false;
@@ -153,32 +176,52 @@ public class CycledLeScannerForLollipop extends CycledLeScanner {
         return false;
     }
 
-
     @Override
     protected void startScan() {
         List<ScanFilter> filters = new ArrayList<ScanFilter>();
-        if (mScanner == null) {
-            BeaconManager.logDebug(TAG, "Making new Android L scanner");
-            mScanner = getBluetoothAdapter().getBluetoothLeScanner();
-        }
         ScanSettings settings;
 
         if (mBackgroundFlag) {
-            BeaconManager.logDebug(TAG, "starting scan in SCAN_MODE_LOW_POWER");
+            LogManager.d(TAG, "starting scan in SCAN_MODE_LOW_POWER");
             settings = (new ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_POWER)).build();
         } else {
-            BeaconManager.logDebug(TAG, "starting scan in SCAN_MODE_LOW_LATENCY");
+            LogManager.d(TAG, "starting scan in SCAN_MODE_LOW_LATENCY");
             settings = (new ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)).build();
 
         }
-        mScanner.startScan(filters, settings, getNewLeScanCallback());
-
+        try {
+            if (getScanner() != null) {
+                getScanner().startScan(filters, settings, getNewLeScanCallback());
+            }
+        }
+        catch (IllegalStateException e) {
+            LogManager.w(TAG, "Cannot start scan.  Bluetooth may be turned off.");
+        }
     }
 
     @Override
     protected void finishScan() {
-        mScanner.stopScan(getNewLeScanCallback());
+        try {
+            if (getScanner() != null) {
+                getScanner().stopScan(getNewLeScanCallback());
+            }
+        }
+        catch (IllegalStateException e) {
+            LogManager.w(TAG, "Cannot stop scan.  Bluetooth may be turned off.");
+        }
+
         mScanningPaused = true;
+    }
+
+    private BluetoothLeScanner getScanner() {
+        if (mScanner == null) {
+            LogManager.d(TAG, "Making new Android L scanner");
+            mScanner = getBluetoothAdapter().getBluetoothLeScanner();
+            if (mScanner == null) {
+                LogManager.w(TAG, "Failed to make new Android L scanner");
+            }
+        }
+        return mScanner;
     }
 
     private ScanCallback getNewLeScanCallback() {
@@ -187,29 +230,29 @@ public class CycledLeScannerForLollipop extends CycledLeScanner {
 
                 @Override
                 public void onScanResult(int callbackType, ScanResult scanResult) {
-                    BeaconManager.logDebug(TAG, "got record");
+                    LogManager.d(TAG, "got record");
                     mCycledLeScanCallback.onLeScan(scanResult.getDevice(),
                             scanResult.getRssi(), scanResult.getScanRecord().getBytes());
                     if (mBackgroundLScanStartTime > 0) {
-                        mBeaconManager.logDebug(TAG, "got a filtered scan result in the background.");
+                        LogManager.d(TAG, "got a filtered scan result in the background.");
                     }
                 }
 
                 @Override
                 public void onBatchScanResults(List<ScanResult> results) {
-                    BeaconManager.logDebug(TAG, "got batch records");
+                    LogManager.d(TAG, "got batch records");
                     for (ScanResult scanResult : results) {
                         mCycledLeScanCallback.onLeScan(scanResult.getDevice(),
                                 scanResult.getRssi(), scanResult.getScanRecord().getBytes());
                     }
                     if (mBackgroundLScanStartTime > 0) {
-                        mBeaconManager.logDebug(TAG, "got a filtered batch scan result in the background.");
+                        LogManager.d(TAG, "got a filtered batch scan result in the background.");
                     }
                 }
 
                 @Override
                 public void onScanFailed(int i) {
-                    Log.e(TAG, "Scan Failed");
+                    LogManager.e(TAG, "Scan Failed");
                 }
             };
         }
